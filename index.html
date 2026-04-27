@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#3b82f6">
+  <title>Voice Object Detector</title>
+  
+  <!-- Load TensorFlow.js and COCO-SSD Model -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  
+  <style>
+    :root {
+      --primary: #3b82f6;
+      --success: #10b981;
+      --danger: #ef4444;
+      --bg: #f3f4f6;
+      --surface: #ffffff;
+    }
+    
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: #1f2937;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    
+    .container {
+      width: 100%;
+      max-width: 600px;
+      background: var(--surface);
+      border-radius: 20px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      overflow: hidden;
+    }
+    
+    header {
+      padding: 20px;
+      text-align: center;
+      background: var(--primary);
+      color: white;
+    }
+    
+    h1 { font-size: 1.5rem; margin-bottom: 5px; }
+    .subtitle { opacity: 0.9; font-size: 0.9rem; }
+    
+    .viewport {
+      position: relative;
+      background: #000;
+      aspect-ratio: 4/3;
+      width: 100%;
+    }
+    
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+    
+    .status-bar {
+      padding: 12px 20px;
+      background: #e5e7eb;
+      font-size: 0.9rem;
+      text-align: center;
+      font-weight: 500;
+    }
+    
+    .status-bar.error { background: #fee2e2; color: #b91c1c; }
+    .status-bar.loading { background: #dbeafe; color: #1e40af; }
+    .status-bar.active { background: #d1fae5; color: #065f46; }
+    
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 20px;
+    }
+    
+    button {
+      padding: 14px;
+      border: none;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.1s, opacity 0.2s;
+    }
+    
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    
+    #startBtn { background: var(--success); color: white; }
+    #stopBtn { background: var(--danger); color: white; }
+    
+    .detections {
+      padding: 0 20px 20px;
+    }
+    
+    .detection-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      background: #f9fafb;
+      border-radius: 8px;
+      margin-bottom: 8px;
+      border: 1px solid #e5e7eb;
+    }
+    
+    .detection-item.speaking {
+      background: #fef3c7;
+      border-color: #f59e0b;
+    }
+    
+    .name { font-weight: 600; text-transform: capitalize; }
+    .conf { 
+      background: var(--primary); 
+      color: white; 
+      padding: 2px 8px; 
+      border-radius: 4px; 
+      font-size: 0.8rem; 
+    }
+    
+    .secure-warning {
+      display: none;
+      background: #fee2e2;
+      color: #b91c1c;
+      padding: 15px;
+      border-radius: 12px;
+      margin-bottom: 20px;
+      text-align: center;
+    }
+    
+    /* Only show warning if NOT secure context */
+    body:not(.secure) .secure-warning { display: block; }
+    body:not(.secure) .container { display: none; }
+  </style>
+</head>
+<body>
+
+  <!-- Warning for file:// protocol -->
+  <div class="secure-warning">
+    <h3>🚫 Camera Access Blocked</h3>
+    <p>Browsers block camera access for local files. Please open this via a local server or visit the GitHub Pages link.</p>
+  </div>
+
+  <div class="container">
+    <header>
+      <h1>🎤 Voice Object Detector</h1>
+      <p class="subtitle">Detects 80 objects & speaks them aloud</p>
+    </header>
+
+    <div class="viewport">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div id="status" class="status-bar loading">Loading AI Model...</div>
+
+    <div class="controls">
+      <button id="startBtn" onclick="startCamera()" disabled> Start Camera</button>
+      <button id="stopBtn" onclick="stopCamera()" disabled>⏹️ Stop</button>
+    </div>
+
+    <div class="detections" id="detectionsList">
+      <!-- Detected items appear here -->
+    </div>
+  </div>
+
+  <script>
+    // --- Configuration ---
+    const SPEAK_COOLDOWN = 3000; // 3 seconds between speaking same word
+    let model = null;
+    let video = document.getElementById('video');
+    let canvas = document.getElementById('canvas');
+    let ctx = canvas.getContext('2d');
+    let stream = null;
+    let isDetecting = false;
+    let lastSpoken = {};
+
+    // --- Initialization ---
+    window.onload = async () => {
+      // Check if running on HTTPS or localhost (required for camera)
+      if (window.isSecureContext) {
+        document.body.classList.add('secure');
+        await loadModel();
+      }
+    };
+
+    async function loadModel() {
+      const statusEl = document.getElementById('status');
+      try {
+        // Load COCO-SSD model
+        model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        statusEl.textContent = "✅ Model Loaded. Tap Start!";
+        statusEl.className = "status-bar active";
+        document.getElementById('startBtn').disabled = false;
+      } catch (err) {
+        statusEl.textContent = "❌ Failed to load model: " + err.message;
+        statusEl.className = "status-bar error";
+      }
+    }
+
+    // --- Camera Control ---
+    async function startCamera() {
+      const statusEl = document.getElementById('status');
+      try {
+        // Request Camera
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+        });
+        
+        video.srcObject = stream;
+        
+        // Wait for video to be ready
+        video.onloadedmetadata = () => {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          video.play();
+          
+          // Start Detection Loop
+          isDetecting = true;
+          detectLoop();
+          
+          // UI Updates
+          statusEl.textContent = "🔍 Detecting objects...";
+          statusEl.className = "status-bar active";
+          document.getElementById('startBtn').disabled = true;
+          document.getElementById('stopBtn').disabled = false;
+        };
+      } catch (err) {
+        statusEl.textContent = "❌ Camera error: " + err.message;
+        statusEl.className = "status-bar error";
+      }
+    }
+
+    function stopCamera() {
+      isDetecting = false;
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('stopBtn').disabled = true;
+      document.getElementById('status').textContent = "⏹️ Stopped";
+      document.getElementById('status').className = "status-bar";
+      document.getElementById('detectionsList').innerHTML = '';
+      
+      window.speechSynthesis.cancel();
+    }
+
+    // --- Detection Loop ---
+    async function detectLoop() {
+      if (!isDetecting || !model) return;
+
+      // Detect objects
+      const predictions = await model.detect(video);
+      
+      // Clear Canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Clear List
+      const list = document.getElementById('detectionsList');
+      list.innerHTML = '';
+
+      if (predictions.length === 0) {
+        list.innerHTML = '<div style="text-align:center;color:#9ca3af;padding:10px;">Looking for objects...</div>';
+      } else {
+        predictions.forEach(pred => {
+          const [x, y, width, height] = pred.bbox;
+          const confidence = Math.round(pred.score * 100);
+          
+          // Draw Box
+          ctx.strokeStyle = '#3b82f6';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(x, y, width, height);
+          
+          // Draw Label
+          ctx.fillStyle = '#3b82f6';
+          const label = `${pred.class} ${confidence}%`;
+          ctx.fillRect(x, y - 25, ctx.measureText(label).width + 10, 25);
+          ctx.fillStyle = '#fff';
+          ctx.font = '16px sans-serif';
+          ctx.fillText(label, x + 5, y - 7);
+          
+          // Speak Object
+          speak(pred.class);
+          
+          // Add to List
+          const item = document.createElement('div');
+          item.className = 'detection-item';
+          item.id = `item-${pred.class}`;
+          item.innerHTML = `
+            <span class="name">${pred.class}</span>
+            <span class="conf">${confidence}%</span>
+          `;
+          list.appendChild(item);
+        });
+      }
+
+      // Continue loop
+      requestAnimationFrame(detectLoop);
+    }
+
+    // --- Text to Speech ---
+    function speak(text) {
+      const now = Date.now();
+      // Only speak if cooldown has passed
+      if (!lastSpoken[text] || (now - lastSpoken[text]) > SPEAK_COOLDOWN) {
+        lastSpoken[text] = now;
+        
+        // Cancel current speech to speak new object immediately
+        window.speechSynthesis.cancel();
+        
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        
+        // Highlight list item
+        utterance.onstart = () => {
+          document.querySelectorAll('.detection-item').forEach(el => el.classList.remove('speaking'));
+          const el = document.getElementById(`item-${text}`);
+          if (el) el.classList.add('speaking');
+        };
+        
+        window.speechSynthesis.speak(utterance);
+      }
+    }
+  </script>
+</body>
+</html>
