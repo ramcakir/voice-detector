@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#3b82f6">
+  <title>Voice Object Detector</title>
+  
+  <!-- TensorFlow.js & COCO-SSD -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  
+  <style>
+    :root { --primary: #3b82f6; --success: #10b981; --danger: #ef4444; --bg: #f3f4f6; --surface: #ffffff; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: #1f2937; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 16px; }
+    .container { width: 100%; max-width: 600px; background: var(--surface); border-radius: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); overflow: hidden; }
+    header { padding: 16px; text-align: center; background: var(--primary); color: white; }
+    h1 { font-size: 1.4rem; margin-bottom: 4px; }
+    .subtitle { opacity: 0.9; font-size: 0.85rem; }
+    .viewport { position: relative; background: #000; aspect-ratio: 4/3; width: 100%; }
+    video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    .status-bar { padding: 10px 16px; background: #e5e7eb; font-size: 0.9rem; text-align: center; font-weight: 500; }
+    .status-bar.error { background: #fee2e2; color: #b91c1c; }
+    .status-bar.loading { background: #dbeafe; color: #1e40af; }
+    .status-bar.active { background: #d1fae5; color: #065f46; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 12px 16px; }
+    button { padding: 12px; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: 0.15s; }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #startBtn { background: var(--success); color: white; }
+    #stopBtn { background: var(--danger); color: white; }
+    .lang-selector { padding: 0 16px 12px; }
+    select { width: 100%; padding: 10px; border-radius: 8px; border: 2px solid #e5e7eb; font-size: 1rem; background: #f9fafb; outline: none; }
+    select:focus { border-color: var(--primary); }
+    .detections { padding: 0 16px 16px; }
+    .detection-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: #f9fafb; border-radius: 8px; margin-bottom: 6px; border: 1px solid #e5e7eb; }
+    .detection-item.speaking { background: #fef3c7; border-color: #f59e0b; }
+    .name { font-weight: 600; }
+    .conf { background: var(--primary); color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }
+    .secure-warning { display: none; background: #fee2e2; color: #b91c1c; padding: 15px; border-radius: 12px; margin-bottom: 20px; text-align: center; }
+    body:not(.secure) .secure-warning { display: block; }
+    body:not(.secure) .container { display: none; }
+    @media (max-width: 480px) { h1 { font-size: 1.2rem; } .controls { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+
+  <div class="secure-warning">
+    <h3>🚫 Camera Access Blocked</h3>
+    <p>Browsers block camera access for local files. Please open via a local server or GitHub Pages.</p>
+  </div>
+
+  <div class="container">
+    <header>
+      <h1>🎤 Voice Object Detector</h1>
+      <p class="subtitle">Detects 80 objects & speaks them in your language</p>
+    </header>
+
+    <div class="viewport">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div id="status" class="status-bar loading">Loading AI Model...</div>
+
+    <div class="lang-selector">
+      <select id="langSelect" onchange="setLanguage(this.value)">
+        <option value="en-US">🇺🇸 English</option>
+        <option value="nl-NL">🇳🇱 Dutch</option>
+        <option value="tr-TR">🇹🇷 Turkish</option>
+        <option value="zh-CN">🇨 Mandarin Chinese</option>
+        <option value="es-ES">🇪🇸 Spanish</option>
+        <option value="ar-SA">🇸 Arabic</option>
+      </select>
+    </div>
+
+    <div class="controls">
+      <button id="startBtn" onclick="startCamera()" disabled>🚀 Start Camera</button>
+      <button id="stopBtn" onclick="stopCamera()" disabled>⏹️ Stop</button>
+    </div>
+
+    <div class="detections" id="detectionsList" dir="auto"></div>
+  </div>
+
+  <script>
+    const COOLDOWN = 3000;
+    let selectedLang = 'en-US';
+    let model = null, video = document.getElementById('video'), canvas = document.getElementById('canvas');
+    let ctx = canvas.getContext('2d'), stream = null, isDetecting = false, lastSpoken = {};
+
+    // Full 80-class translation dictionary
+    const T = {
+      person: {en:'person',nl:'persoon',tr:'kişi',zh:'人',es:'persona',ar:'شخص'},
+      bicycle: {en:'bicycle',nl:'fiets',tr:'bisiklet',zh:'自行车',es:'bicicleta',ar:'دراجة'},
+      car: {en:'car',nl:'auto',tr:'araba',zh:'汽车',es:'coche',ar:'سيارة'},
+      motorcycle: {en:'motorcycle',nl:'motorfiets',tr:'motosiklet',zh:'摩托车',es:'motocicleta',ar:'دراجة نارية'},
+      airplane: {en:'airplane',nl:'vliegtuig',tr:'uçak',zh:'飞机',es:'avión',ar:'طائرة'},
+      bus: {en:'bus',nl:'bus',tr:'otobüs',zh:'公共汽车',es:'autobús',ar:'حافلة'},
+      train: {en:'train',nl:'trein',tr:'tren',zh:'火车',es:'tren',ar:'قطار'},
+      truck: {en:'truck',nl:'vrachtwagen',tr:'kamyon',zh:'卡车',es:'camión',ar:'شاحنة'},
+      boat: {en:'boat',nl:'boot',tr:'tekne',zh:'船',es:'barco',ar:'قارب'},
+      'traffic light': {en:'traffic light',nl:'verkeerslicht',tr:'trafik ışığı',zh:'交通灯',es:'semáforo',ar:'إشارة مرور'},
+      'fire hydrant': {en:'fire hydrant',nl:'brandkraan',tr:'yangın musluğu',zh:'消防栓',es:'hidrante',ar:'صندوق إطفاء'},
+      'stop sign': {en:'stop sign',nl:'stopbord',tr:'dur işareti',zh:'停车标志',es:'señal de stop',ar:'علامة توقف'},
+      'parking meter': {en:'parking meter',nl:'parkeermeter',tr:'otopark saati',zh:'停车计时器',es:'parquímetro',ar:'عداد موقف'},
+      bench: {en:'bench',nl:'bank',tr:'bank',zh:'长椅',es:'banco',ar:'مقعد'},
+      bird: {en:'bird',nl:'vogel',tr:'kuş',zh:'鸟',es:'pájaro',ar:'طائر'},
+      cat: {en:'cat',nl:'kat',tr:'kedi',zh:'猫',es:'gato',ar:'قطة'},
+      dog: {en:'dog',nl:'hond',tr:'köpek',zh:'狗',es:'perro',ar:'كلب'},
+      horse: {en:'horse',nl:'paard',tr:'at',zh:'马',es:'caballo',ar:'حصان'},
+      sheep: {en:'sheep',nl:'schaap',tr:'koyun',zh:'羊',es:'oveja',ar:'خروف'},
+      cow: {en:'cow',nl:'koe',tr:'inek',zh:'牛',es:'vaca',ar:'بقرة'},
+      elephant: {en:'elephant',nl:'olifant',tr:'fil',zh:'大象',es:'elefante',ar:'فيل'},
+      bear: {en:'bear',nl:'beer',tr:'ayı',zh:'熊',es:'oso',ar:'دب'},
+      zebra: {en:'zebra',nl:'zebra',tr:'zebra',zh:'斑马',es:'cebra',ar:'حمار وحشي'},
+      giraffe: {en:'giraffe',nl:'giraf',tr:'zürafa',zh:'长颈鹿',es:'jirafa',ar:'زرافة'},
+      backpack: {en:'backpack',nl:'rugzak',tr:'sırt çantası',zh:'背包',es:'mochila',ar:'حقيبة ظهر'},
+      umbrella: {en:'umbrella',nl:'paraplu',tr:'şemsiye',zh:'伞',es:'paraguas',ar:'مظلة'},
+      handbag: {en:'handbag',nl:'handtas',tr:'el çantası',zh:'手提包',es:'bolso',ar:'حقيبة يد'},
+      tie: {en:'tie',nl:'das',tr:'kravat',zh:'领带',es:'corbata',ar:'ربطة عنق'},
+      suitcase: {en:'suitcase',nl:'koffer',tr:'bavul',zh:'行李箱',es:'maleta',ar:'حقيبة سفر'},
+      frisbee: {en:'frisbee',nl:'frisbee',tr:'frizbi',zh:'飞盘',es:'frisbee',ar:'فريسبي'},
+      skis: {en:'skis',nl:'ski\'s',tr:'kayak',zh:'滑雪板',es:'esquís',ar:'زلاجات'},
+      snowboard: {en:'snowboard',nl:'snowboard',tr:'snowboard',zh:'滑雪板',es:'snowboard',ar:'تزلج على الجليد'},
+      'sports ball': {en:'sports ball',nl:'sportbal',tr:'spor topu',zh:'球',es:'pelota deportiva',ar:'كرة رياضية'},
+      kite: {en:'kite',nl:'vlieger',tr:'uçurtma',zh:'风筝',es:'cometa',ar:'طائرة ورقية'},
+      'baseball bat': {en:'baseball bat',nl:'honkbalknuppel',tr:'beyzbol sopası',zh:'棒球棒',es:'bate de béisbol',ar:'مضرب بيسبول'},
+      'baseball glove': {en:'baseball glove',nl:'honkbalhandschoen',tr:'beyzbol eldiveni',zh:'棒球手套',es:'guante de béisbol',ar:'قفاز بيسبول'},
+      skateboard: {en:'skateboard',nl:'skateboard',tr:'kaykay',zh:'滑板',es:'monopatín',ar:'لوح تزلج'},
+      surfboard: {en:'surfboard',nl:'surfplank',tr:'sörf tahtası',zh:'冲浪板',es:'tabla de surf',ar:'لوح تزلج مائي'},
+      'tennis racket': {en:'tennis racket',nl:'tennisracket',tr:'tenis raketi',zh:'网球拍',es:'raqueta de tenis',ar:'مضرب تنس'},
+      bottle: {en:'bottle',nl:'fles',tr:'şişe',zh:'瓶子',es:'botella',ar:'زجاجة'},
+      'wine glass': {en:'wine glass',nl:'wijnglas',tr:'şarap kadehi',zh:'酒杯',es:'copa de vino',ar:'كأس نبيذ'},
+      cup: {en:'cup',nl:'kop',tr:'fincan',zh:'杯子',es:'taza',ar:'كوب'},
+      fork: {en:'fork',nl:'vork',tr:'çatal',zh:'叉子',es:'tenedor',ar:'شوكة'},
+      knife: {en:'knife',nl:'mes',tr:'bıçak',zh:'刀',es:'cuchillo',ar:'سكين'},
+      spoon: {en:'spoon',nl:'lepel',tr:'kaşık',zh:'勺子',es:'cuchara',ar:'ملعقة'},
+      bowl: {en:'bowl',nl:'kom',tr:'kase',zh:'碗',es:'tazón',ar:'وعاء'},
+      banana: {en:'banana',nl:'banaan',tr:'muz',zh:'香蕉',es:'plátano',ar:'موز'},
+      apple: {en:'apple',nl:'appel',tr:'elma',zh:'苹果',es:'manzana',ar:'تفاحة'},
+      sandwich: {en:'sandwich',nl:'sandwich',tr:'sandviç',zh:'三明治',es:'sándwich',ar:'شطيرة'},
+      orange: {en:'orange',nl:'sinaasappel',tr:'portakal',zh:'橙子',es:'naranja',ar:'برتقالة'},
+      broccoli: {en:'broccoli',nl:'broccoli',tr:'brokoli',zh:'西兰花',es:'brócoli',ar:'بروكلي'},
+      carrot: {en:'carrot',nl:'wortel',tr:'havuç',zh:'胡萝卜',es:'zanahoria',ar:'جزر'},
+      'hot dog': {en:'hot dog',nl:'hotdog',tr:'sosisli',zh:'热狗',es:'perrito caliente',ar:'هوت دوج'},
+      pizza: {en:'pizza',nl:'pizza',tr:'pizza',zh:'披萨',es:'pizza',ar:'بيتزا'},
+      donut: {en:'donut',nl:'donut',tr:'donut',zh:'甜甜圈',es:'dona',ar:'دونات'},
+      cake: {en:'cake',nl:'cake',tr:'kek',zh:'蛋糕',es:'pastel',ar:'كعكة'},
+      chair: {en:'chair',nl:'stoel',tr:'sandalye',zh:'椅子',es:'silla',ar:'كرسي'},
+      couch: {en:'couch',nl:'bank',tr:'kanepe',zh:'沙发',es:'sofá',ar:'أريكة'},
+      'potted plant': {en:'potted plant',nl:'potplant',tr:'saksı bitkisi',zh:'盆栽',es:'planta en maceta',ar:'نبتة مزروعة'},
+      bed: {en:'bed',nl:'bed',tr:'yatak',zh:'床',es:'cama',ar:'سرير'},
+      'dining table': {en:'dining table',nl:'eettafel',tr:'yemek masası',zh:'餐桌',es:'mesa de comedor',ar:'طاولة طعام'},
+      toilet: {en:'toilet',nl:'toilet',tr:'tuvalet',zh:'厕所',es:'inodoro',ar:'مرحاض'},
+      tv: {en:'tv',nl:'tv',tr:'televizyon',zh:'电视',es:'televisor',ar:'تلفزيون'},
+      laptop: {en:'laptop',nl:'laptop',tr:'dizüstü bilgisayar',zh:'笔记本电脑',es:'portátil',ar:'حاسوب محمول'},
+      mouse: {en:'mouse',nl:'muis',tr:'fare',zh:'鼠标',es:'ratón',ar:'فأرة'},
+      remote: {en:'remote',nl:'afstandsbediening',tr:'kumanda',zh:'遥控器',es:'control remoto',ar:'جهاز تحكم'},
+      keyboard: {en:'keyboard',nl:'toetsenbord',tr:'klavye',zh:'键盘',es:'teclado',ar:'لوحة مفاتيح'},
+      'cell phone': {en:'cell phone',nl:'mobiele telefoon',tr:'cep telefonu',zh:'手机',es:'teléfono móvil',ar:'هاتف محمول'},
+      microwave: {en:'microwave',nl:'magnetron',tr:'mikrodalga fırın',zh:'微波炉',es:'microondas',ar:'ميكروويف'},
+      oven: {en:'oven',nl:'oven',tr:'fırın',zh:'烤箱',es:'horno',ar:'فرن'},
+      toaster: {en:'toaster',nl:'broodrooster',tr:'tost makinesi',zh:'烤面包机',es:'tostadora',ar:'محمصة خبز'},
+      sink: {en:'sink',nl:'gootsteen',tr:'lavabo',zh:'水槽',es:'fregadero',ar:'حوض'},
+      refrigerator: {en:'refrigerator',nl:'koelkast',tr:'buzdolabı',zh:'冰箱',es:'refrigerador',ar:'ثلاجة'},
+      book: {en:'book',nl:'boek',tr:'kitap',zh:'书',es:'libro',ar:'كتاب'},
+      clock: {en:'clock',nl:'klok',tr:'saat',zh:'钟',es:'reloj',ar:'ساعة'},
+      vase: {en:'vase',nl:'vaas',tr:'vazo',zh:'花瓶',es:'jarrón',ar:'مزهرية'},
+      scissors: {en:'scissors',nl:'schaar',tr:'makas',zh:'剪刀',es:'tijeras',ar:'مقص'},
+      'teddy bear': {en:'teddy bear',nl:'teddybeer',tr:'oyuncak ayı',zh:'泰迪熊',es:'oso de peluche',ar:'دب لعبة'},
+      'hair drier': {en:'hair drier',nl:'föhn',tr:'saç kurutma makinesi',zh:'吹风机',es:'secador de pelo',ar:'مجفف شعر'},
+      toothbrush: {en:'toothbrush',nl:'tandenborstel',tr:'diş fırçası',zh:'牙刷',es:'cepillo de dientes',ar:'فرشاة أسنان'}
+    };
+
+    function getWord(eng) { return T[eng]?.[selectedLang.split('-')[0]] || eng; }
+
+    window.onload = async () => {
+      if (window.isSecureContext) document.body.classList.add('secure');
+      try {
+        model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+        document.getElementById('status').textContent = "✅ Ready. Tap Start!";
+        document.getElementById('status').className = "status-bar active";
+        document.getElementById('startBtn').disabled = false;
+      } catch (e) {
+        document.getElementById('status').textContent = "❌ " + e.message;
+        document.getElementById('status').className = "status-bar error";
+      }
+    };
+
+    function setLanguage(lang) {
+      selectedLang = lang;
+      window.speechSynthesis.cancel();
+    }
+
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } } });
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+          video.play(); isDetecting = true; detectLoop();
+          document.getElementById('status').textContent = "🔍 Detecting...";
+          document.getElementById('startBtn').disabled = true;
+          document.getElementById('stopBtn').disabled = false;
+        };
+      } catch (e) {
+        document.getElementById('status').textContent = "❌ " + e.message;
+        document.getElementById('status').className = "status-bar error";
+      }
+    }
+
+    function stopCamera() {
+      isDetecting = false;
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      video.srcObject = null; ctx.clearRect(0,0,canvas.width,canvas.height);
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('stopBtn').disabled = true;
+      document.getElementById('status').textContent = "⏹️ Stopped";
+      document.getElementById('status').className = "status-bar";
+      document.getElementById('detectionsList').innerHTML = '';
+      window.speechSynthesis.cancel();
+    }
+
+    async function detectLoop() {
+      if (!isDetecting || !model) return;
+      const preds = await model.detect(video);
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      const list = document.getElementById('detectionsList');
+      list.innerHTML = '';
+
+      if (preds.length === 0) {
+        list.innerHTML = '<div style="text-align:center;color:#9ca3af;padding:10px;">Scanning...</div>';
+      } else {
+        preds.forEach(p => {
+          const [x,y,w,h] = p.bbox, conf = Math.round(p.score*100);
+          ctx.strokeStyle='#3b82f6'; ctx.lineWidth=3; ctx.strokeRect(x,y,w,h);
+          ctx.fillStyle='#3b82f6'; const lbl=`${p.class} ${conf}%`;
+          ctx.fillRect(x,y-24,ctx.measureText(lbl).width+8,24);
+          ctx.fillStyle='#fff'; ctx.font='15px system-ui'; ctx.fillText(lbl,x+4,y-6);
+          
+          speak(p.class);
+          const el=document.createElement('div'); el.className='detection-item'; el.id=`i-${p.class}`;
+          el.innerHTML=`<span class="name">${getWord(p.class)}</span><span class="conf">${conf}%</span>`;
+          list.appendChild(el);
+        });
+      }
+      requestAnimationFrame(detectLoop);
+    }
+
+    function speak(eng) {
+      const now=Date.now(), word=getWord(eng);
+      if (!lastSpoken[eng] || now-lastSpoken[eng] > COOLDOWN) {
+        lastSpoken[eng]=now; window.speechSynthesis.cancel();
+        const u=new SpeechSynthesisUtterance(word);
+        u.lang=selectedLang; u.rate=1.0;
+        u.onstart=()=>{document.querySelectorAll('.detection-item').forEach(e=>e.classList.remove('speaking'));
+          const el=document.getElementById(`i-${eng}`); if(el) el.classList.add('speaking');};
+        window.speechSynthesis.speak(u);
+      }
+    }
+  </script>
+</body>
+</html>
