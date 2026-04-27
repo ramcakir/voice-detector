@@ -89,7 +89,7 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 10px;
-      padding: 20px;
+      padding: 15px 20px 20px;
     }
     
     button {
@@ -107,6 +107,25 @@
     
     #startBtn { background: var(--success); color: white; }
     #stopBtn { background: var(--danger); color: white; }
+    
+    .lang-selector {
+      padding: 0 20px;
+      margin-top: 10px;
+    }
+    
+    select {
+      width: 100%;
+      padding: 12px;
+      border-radius: 10px;
+      border: 2px solid #e5e7eb;
+      font-size: 1rem;
+      background: #f9fafb;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    
+    select:focus { border-color: var(--primary); }
     
     .detections {
       padding: 0 20px 20px;
@@ -147,9 +166,13 @@
       text-align: center;
     }
     
-    /* Only show warning if NOT secure context */
     body:not(.secure) .secure-warning { display: block; }
     body:not(.secure) .container { display: none; }
+    
+    @media (max-width: 480px) {
+      h1 { font-size: 1.3rem; }
+      .controls { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -173,8 +196,19 @@
 
     <div id="status" class="status-bar loading">Loading AI Model...</div>
 
+    <div class="lang-selector">
+      <select id="langSelect" onchange="setLanguage(this.value)">
+        <option value="en-US">🇺🇸 English</option>
+        <option value="nl-NL">🇳🇱 Dutch</option>
+        <option value="tr-TR">🇹🇷 Turkish</option>
+        <option value="zh-CN">🇨🇳 Mandarin Chinese</option>
+        <option value="es-ES">🇪🇸 Spanish</option>
+        <option value="ar-SA">🇸🇦 Arabic</option>
+      </select>
+    </div>
+
     <div class="controls">
-      <button id="startBtn" onclick="startCamera()" disabled> Start Camera</button>
+      <button id="startBtn" onclick="startCamera()" disabled>🚀 Start Camera</button>
       <button id="stopBtn" onclick="stopCamera()" disabled>⏹️ Stop</button>
     </div>
 
@@ -186,6 +220,7 @@
   <script>
     // --- Configuration ---
     const SPEAK_COOLDOWN = 3000; // 3 seconds between speaking same word
+    let selectedLang = 'en-US';
     let model = null;
     let video = document.getElementById('video');
     let canvas = document.getElementById('canvas');
@@ -196,17 +231,21 @@
 
     // --- Initialization ---
     window.onload = async () => {
-      // Check if running on HTTPS or localhost (required for camera)
       if (window.isSecureContext) {
         document.body.classList.add('secure');
         await loadModel();
       }
     };
 
+    function setLanguage(lang) {
+      selectedLang = lang;
+      window.speechSynthesis.cancel();
+      console.log(`Language switched to: ${lang}`);
+    }
+
     async function loadModel() {
       const statusEl = document.getElementById('status');
       try {
-        // Load COCO-SSD model
         model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
         statusEl.textContent = "✅ Model Loaded. Tap Start!";
         statusEl.className = "status-bar active";
@@ -221,24 +260,20 @@
     async function startCamera() {
       const statusEl = document.getElementById('status');
       try {
-        // Request Camera
         stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
         });
         
         video.srcObject = stream;
         
-        // Wait for video to be ready
         video.onloadedmetadata = () => {
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           video.play();
           
-          // Start Detection Loop
           isDetecting = true;
           detectLoop();
           
-          // UI Updates
           statusEl.textContent = "🔍 Detecting objects...";
           statusEl.className = "status-bar active";
           document.getElementById('startBtn').disabled = true;
@@ -272,13 +307,9 @@
     async function detectLoop() {
       if (!isDetecting || !model) return;
 
-      // Detect objects
       const predictions = await model.detect(video);
-      
-      // Clear Canvas
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       
-      // Clear List
       const list = document.getElementById('detectionsList');
       list.innerHTML = '';
 
@@ -289,12 +320,10 @@
           const [x, y, width, height] = pred.bbox;
           const confidence = Math.round(pred.score * 100);
           
-          // Draw Box
           ctx.strokeStyle = '#3b82f6';
           ctx.lineWidth = 3;
           ctx.strokeRect(x, y, width, height);
           
-          // Draw Label
           ctx.fillStyle = '#3b82f6';
           const label = `${pred.class} ${confidence}%`;
           ctx.fillRect(x, y - 25, ctx.measureText(label).width + 10, 25);
@@ -302,10 +331,8 @@
           ctx.font = '16px sans-serif';
           ctx.fillText(label, x + 5, y - 7);
           
-          // Speak Object
           speak(pred.class);
           
-          // Add to List
           const item = document.createElement('div');
           item.className = 'detection-item';
           item.id = `item-${pred.class}`;
@@ -317,25 +344,21 @@
         });
       }
 
-      // Continue loop
       requestAnimationFrame(detectLoop);
     }
 
     // --- Text to Speech ---
     function speak(text) {
       const now = Date.now();
-      // Only speak if cooldown has passed
       if (!lastSpoken[text] || (now - lastSpoken[text]) > SPEAK_COOLDOWN) {
         lastSpoken[text] = now;
-        
-        // Cancel current speech to speak new object immediately
         window.speechSynthesis.cancel();
         
         const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = selectedLang; // 🌍 Uses selected language for pronunciation
         utterance.rate = 1.0;
         utterance.pitch = 1.0;
         
-        // Highlight list item
         utterance.onstart = () => {
           document.querySelectorAll('.detection-item').forEach(el => el.classList.remove('speaking'));
           const el = document.getElementById(`item-${text}`);
